@@ -34,4 +34,3 @@ tzdata==2025.1
 wandb==0.19.8
 wheel==0.45.1
 moviepy==2.1.2
-opencv-python
