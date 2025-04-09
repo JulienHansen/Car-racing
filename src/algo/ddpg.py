@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Self-contained DDPG implementation for the CarRacing-v0 environment.
+Self-contained DDPG implementation for the CarRacing-v3 environment.
 This implementation uses CNNs to process image observations and outputs a 3-dimensional action:
     - Steering in [-1, 1]
     - Gas and Brake in [0, 1]
@@ -95,9 +95,8 @@ class CNNActor(nn.Module):
             nn.Linear(conv_out_size, 512),
             nn.ReLU()
         )
-        # Steering output: [-1,1]
+
         self.fc_steer = nn.Linear(512, 1)
-        # Gas and Brake outputs: [0,1]
         self.fc_acc_brake = nn.Linear(512, 2)
         self.tanh = nn.Tanh()
         self.sigmoid = nn.Sigmoid()
@@ -114,7 +113,7 @@ class CNNActor(nn.Module):
 class CNNCritic(nn.Module):
     def __init__(self):
         super().__init__()
-        # Convolutional layers for state feature extraction
+
         self.conv = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=8, stride=4),
             nn.ReLU(),
@@ -128,7 +127,7 @@ class CNNCritic(nn.Module):
             nn.Linear(conv_out_size, 512),
             nn.ReLU()
         )
-        # Fully connected layers to combine state features with action input (3-dim)
+
         self.fc = nn.Sequential(
             nn.Linear(512 + 3, 256),
             nn.ReLU(),
@@ -183,7 +182,7 @@ class DDPG:
 
         x, a, r, x_next, done = self.memory.sample()
 
-        # Update Critic
+        # Critic
         self.critic.train()
         q = self.critic(x, a)
         with torch.no_grad():
@@ -195,7 +194,7 @@ class DDPG:
         critic_loss.backward()
         self.optim_critic.step()
 
-        # Update Actor
+        # Actor
         actor_loss = -self.critic(x, self.actor(x)).mean()
         self.optim_actor.zero_grad()
         actor_loss.backward()
@@ -213,8 +212,7 @@ class DDPG:
 
 def main(render: bool = False, n_episodes: int = 500):
     gym.logger.min_level = 40
-    # Standard environment name is CarRacing-v2 in Gymnasium
-    env = gym.make('CarRacing-v3', continuous=True) # Ensure continuous actions
+    env = gym.make('CarRacing-v3', continuous=True) 
     max_steps = 1000
     rewards = []
 
@@ -222,42 +220,34 @@ def main(render: bool = False, n_episodes: int = 500):
     noise = OrnsteinUhlenbeck(env.action_space)
 
     for episode in tqdm(range(n_episodes), desc="Training Episodes"):
-        # --- CORRECTED RESET ---
-        obs, info = env.reset() # Unpack observation and info
+        obs, info = env.reset() 
         noise.reset()
         episode_reward = 0
 
         for step in range(max_steps):
             if render:
                 env.render()
-
-            # --- Pass ONLY obs (the array) to action ---
             a = agent.action(obs)
-            a = noise.action(a) # Apply noise AFTER getting the deterministic action
+            a = noise.action(a) 
 
-            # --- CORRECTED STEP ---
             obs_next, reward, terminated, truncated, info = env.step(a)
-            done = terminated or truncated # Combine termination conditions
+            done = terminated or truncated 
 
-            # Preprocess observations for storage (convert to torch tensor with shape (3,96,96))
-            # Ensure obs and obs_next are the numpy arrays before processing
             obs_proc = torch.from_numpy(np.transpose(obs, (2, 0, 1)) / 255.0).float()
             obs_next_proc = torch.from_numpy(np.transpose(obs_next, (2, 0, 1)) / 255.0).float()
 
-            agent.memory.push((obs_proc, a, reward, obs_next_proc, float(done))) # Store done as float
+            agent.memory.push((obs_proc, a, reward, obs_next_proc, float(done))) 
             if agent.memory.is_ready():
                 agent.optimize()
 
-            obs = obs_next # Update obs for the next loop iteration
+            obs = obs_next 
             episode_reward += reward
             if done:
                 break
 
         rewards.append(episode_reward)
-        # Use TQDM's set_postfix for cleaner progress updates
         tqdm.write(f"Episode {episode+1}/{n_episodes}, Reward: {episode_reward:.2f}")
 
-    # Plot and save the training rewards
     plt.figure()
     plt.plot(rewards)
     plt.xlabel('Episode')
