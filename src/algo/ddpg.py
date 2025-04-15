@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Self-contained DDPG implementation for the CarRacing-v3 environment.
 This implementation uses CNNs to process image observations and outputs a 3-dimensional action:
@@ -14,6 +13,14 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+
+# ----------------------
+# Preprocessing Function
+# ----------------------
+
+def preprocess(obs: np.ndarray) -> torch.Tensor:
+    """Convert (H,W,C) image to (C,H,W) tensor in [0,1]"""
+    return torch.from_numpy(np.transpose(obs, (2, 0, 1))).float().div(255.0)
 
 # ----------------------
 # Replay Buffer
@@ -44,7 +51,7 @@ class ReplayBuffer:
         x, a, r, x_next, done = zip(*choices)
         x = torch.stack(x)
         x_next = torch.stack(x_next)
-        a = torch.tensor(a).float()
+        a = torch.tensor(np.array(a)).float()  # ✅ Fast conversion
         r = torch.tensor(r).float().unsqueeze(1)
         done = torch.tensor(done).float().unsqueeze(1)
         return x, a, r, x_next, done
@@ -81,13 +88,12 @@ class OrnsteinUhlenbeck:
 class CNNActor(nn.Module):
     def __init__(self):
         super().__init__()
-        # Convolutional layers to extract features from the image input (3 x 96 x 96)
         self.conv = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=8, stride=4),  # -> (32, 22, 22)
+            nn.Conv2d(3, 32, kernel_size=8, stride=4),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),  # -> (64, 10, 10)
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),  # -> (64, 8, 8)
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU()
         )
         conv_out_size = 64 * 8 * 8
@@ -95,7 +101,6 @@ class CNNActor(nn.Module):
             nn.Linear(conv_out_size, 512),
             nn.ReLU()
         )
-
         self.fc_steer = nn.Linear(512, 1)
         self.fc_acc_brake = nn.Linear(512, 2)
         self.tanh = nn.Tanh()
@@ -113,7 +118,6 @@ class CNNActor(nn.Module):
 class CNNCritic(nn.Module):
     def __init__(self):
         super().__init__()
-
         self.conv = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=8, stride=4),
             nn.ReLU(),
@@ -127,7 +131,6 @@ class CNNCritic(nn.Module):
             nn.Linear(conv_out_size, 512),
             nn.ReLU()
         )
-
         self.fc = nn.Sequential(
             nn.Linear(512 + 3, 256),
             nn.ReLU(),
@@ -167,13 +170,9 @@ class DDPG:
         self.optim_critic = optim.Adam(self.critic.parameters(), lr=lr_critic)
 
     def action(self, obs: np.array) -> np.array:
-        # Preprocess observation: convert (96,96,3) to (3,96,96) and scale to [0,1]
-        obs_proc = np.transpose(obs, (2, 0, 1)) / 255.0
-        obs_tensor = torch.from_numpy(obs_proc).float().unsqueeze(0)
-        self.actor.eval()
+        obs_tensor = preprocess(obs).unsqueeze(0)
         with torch.no_grad():
             a = self.actor(obs_tensor)
-        self.actor.train()
         return a.cpu().numpy()[0]
 
     def optimize(self):
@@ -183,7 +182,6 @@ class DDPG:
         x, a, r, x_next, done = self.memory.sample()
 
         # Critic
-        self.critic.train()
         q = self.critic(x, a)
         with torch.no_grad():
             a_next = self.actor_tar(x_next)
@@ -200,7 +198,7 @@ class DDPG:
         actor_loss.backward()
         self.optim_actor.step()
 
-        # Soft update target networks
+        # Soft updates
         for param_tar, param in zip(self.actor_tar.parameters(), self.actor.parameters()):
             param_tar.data.copy_(param.data * self.tau + param_tar.data * (1.0 - self.tau))
         for param_tar, param in zip(self.critic_tar.parameters(), self.critic.parameters()):
@@ -228,19 +226,19 @@ def main(render: bool = False, n_episodes: int = 500):
             if render:
                 env.render()
             a = agent.action(obs)
-            a = noise.action(a) 
+            a = noise.action(a)
 
             obs_next, reward, terminated, truncated, info = env.step(a)
-            done = terminated or truncated 
+            done = terminated or truncated
 
-            obs_proc = torch.from_numpy(np.transpose(obs, (2, 0, 1)) / 255.0).float()
-            obs_next_proc = torch.from_numpy(np.transpose(obs_next, (2, 0, 1)) / 255.0).float()
+            obs_proc = preprocess(obs)
+            obs_next_proc = preprocess(obs_next)
 
             agent.memory.push((obs_proc, a, reward, obs_next_proc, float(done))) 
             if agent.memory.is_ready():
                 agent.optimize()
 
-            obs = obs_next 
+            obs = obs_next
             episode_reward += reward
             if done:
                 break
@@ -252,7 +250,7 @@ def main(render: bool = False, n_episodes: int = 500):
     plt.plot(rewards)
     plt.xlabel('Episode')
     plt.ylabel('Episode Reward')
-    plt.title('DDPG on CarRacing-v2')
+    plt.title('DDPG on CarRacing-v3')
     plt.savefig('ddpg_carracing_rewards.pdf')
     plt.show()
     env.close()
