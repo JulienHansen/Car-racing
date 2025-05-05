@@ -1,7 +1,11 @@
-# Place your imports below
+from pathlib import Path
+
+from stable_baselines3 import DDPG
+from stable_baselines3 import PPO
+from stable_baselines3 import SAC
 
 
-def load_best_agent():
+def load_best_agent(path):
     """
     Load the best agent from the specified path.
 
@@ -39,4 +43,17 @@ def load_best_agent():
         >>> observation = get_current_observation()  # Your method to fetch the current observation.
         >>> action = model(observation)
     """
-    pass  # Replace this with your implementation
+    
+    model_name = path.split("/")[-1].split("-")[0].strip()
+    
+    path = Path(path).joinpath("model_best.zip")
+    assert path.exists(), f"{path} doesn't exist"
+    
+    if model_name == "ppo":
+      return PPO.load(path)
+    elif model_name == "ddpg":
+      return DDPG.load(path)
+    elif model_name == "sac":
+      return SAC.load(path)
+    else:
+      raise NotImplementedError(f"{model_name} is not implemented")
