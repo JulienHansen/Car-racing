@@ -7,7 +7,7 @@ Repo for solving car-racing gymnasium environment through Reinforcement learning
 In order to start the training of a model presented in the report, you can use the command
 
 ```bash
-python src/sb3/interface.py \   #
+python src/sb3/interface.py \   
     --model "ppo" \             # "ppo" | "ddp" | "sac"
     --timesteps 7500 \          # number of timesteps used for training
     --eval_freq 2500 \          # frequence at which the model is evaluated
@@ -29,4 +29,22 @@ python src/sb3/interface.py --model "ddpg"
 * Starting SAC
 ```bash
 python src/sb3/interface.py --model "sac"
+```
+
+### Evaluation
+```bash
+python src/interface.py \
+    --model "ppo" \             # "ppo" | "ddp" | "sac"
+    --stable_baseline True      # Set to true to use sb3 models
+```
+
+## Question 3 : Personal algorithm
+
+### Training
+
+### Evalulation
+```bash
+python src/interface.py \
+    --model "ppo" \             # "ppo" | "ddp" | "sac"
+    --stable_baseline False     # Set to false to use personal models
 ```
