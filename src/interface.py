@@ -3,16 +3,23 @@ import numpy as np
 import matplotlib.pyplot as plt
 from load_agent import load_best_agent
 
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.atari_wrappers import WarpFrame
 from stable_baselines3.common.vec_env import VecFrameStack, VecTransposeImage
 
 import constant as cst
 
-
 # Load the trained agent
-env = gym.make(cst.env_str, render_mode="human", lap_complete_percent=0.95, domain_randomize=False, continuous=True)
+#env = gym.make(cst.env_str, render_mode="human", lap_complete_percent=0.95, domain_randomize=False, continuous=True)
+
+env = make_vec_env(cst.env_str, wrapper_class=WarpFrame, 
+             env_kwargs={"render_mode":"human", 
+                         "lap_complete_percent":0.95, 
+                         "domain_randomize":False, 
+                         "continuous":True})
 env = VecFrameStack(env, n_stack=4)
 env = VecTransposeImage(env)
-observation, info = env.reset()
+observation = env.reset()
 
 # load agent
 MODEL_NAME = "ppo" # "ppo" | "ddpg" | "sac"
@@ -23,9 +30,9 @@ episode_over = False
 rewards = []
 while not episode_over:
     action, _states = model.predict(observation, deterministic=True)
-    observation, reward, terminated, truncated, info = env.step(action)
+    observation, reward, terminated, info = env.step(action)
     rewards.append(reward)
-    episode_over = terminated or truncated
+    episode_over = terminated
 
 # Print the total reward
 print(f"Total reward: {sum(rewards)}")

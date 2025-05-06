@@ -21,20 +21,24 @@ import constant as cst
 
 os.makedirs(cst.LOG_DIR, exist_ok=True)
 os.makedirs(cst.VIDEO_DIR, exist_ok=True)
+
+
+def get_env(env_str, n_stack = 4, gray_scale = True):
+    wrapper_class = WarpFrame if gray_scale else None
+    
+    env = make_vec_env(env_str, n_envs=1, wrapper_class=wrapper_class)
+    env = VecFrameStack(env, n_stack=n_stack)
+    env = VecTransposeImage(env)
+    
+    return env
+    
+
 gray_scale = True  
-
-# Testing grayscale conversion to see differences
-wrapper_class = WarpFrame if gray_scale else None
-
 # Training Environment
-train_env = make_vec_env(cst.LOG_DIR, n_envs=1, wrapper_class=wrapper_class)
-train_env = VecFrameStack(train_env, n_stack=4)
-train_env = VecTransposeImage(train_env)
+train_env = get_env(cst.env_str, n_stack=4, gray_scale=gray_scale)
 
 # Testing Environment
-eval_env = make_vec_env(cst.LOG_DIR, n_envs=1, wrapper_class=wrapper_class)
-eval_env = VecFrameStack(eval_env, n_stack=4)
-eval_env = VecTransposeImage(eval_env)
+eval_env = get_env(cst.env_str, n_stack=4, gray_scale=gray_scale)
 
 verbose = 1
 
