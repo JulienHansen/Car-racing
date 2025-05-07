@@ -1,4 +1,3 @@
-# Simplified PPO for CarRacing-v3 using YAML config, tqdm, saving, and video
 import os
 import random
 import time
@@ -13,317 +12,271 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.normal import Normal
 
-def parse_args():
-    """Parses command-line arguments."""
-    parser = argparse.ArgumentParser(description="PPO agent for CarRacing-v3 with YAML config")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="cfg_ppo.yaml",
-        help="Path to the YAML configuration file",
-    )
+# YAML handling logic
+def parse_cli_args():
+    parser = argparse.ArgumentParser(description="PPO agent for CarRacing with YAML config")
+    parser.add_argument("--config", type=str, default="cfg_ppo.yaml", help="Path to YAML config file")
     return parser.parse_args()
 
-def load_config(config_path):
-    """Loads configuration from a YAML file."""
+def load_yaml_config(config_path: str) -> dict:
     try:
         with open(config_path, 'r') as f:
-            # Ensure boolean values are parsed correctly
-            config = yaml.load(f, Loader=yaml.FullLoader)
-        print(f"Loaded configuration from {config_path}")
-        # Default values for new options if missing in file
-        config.setdefault('save_model', False)
-        config.setdefault('capture_video', False)
-        config.setdefault('video_frequency', 50) # Default frequency if not set
-        return config
+            cfg = yaml.safe_load(f) # safe_load is generally preferred
+        cfg.setdefault('save_model', False)
+        cfg.setdefault('capture_video', False)
+        cfg.setdefault('video_frequency', 50)
+        cfg.setdefault('frame_stack', 1) # Default to no frame stacking if not specified
+        print(f"Configuration loaded from {config_path}")
+        return cfg
     except FileNotFoundError:
-        print(f"Error: Configuration file not found at {config_path}")
+        print(f"FATAL: Configuration file '{config_path}' not found.")
         exit(1)
     except yaml.YAMLError as e:
-        print(f"Error parsing YAML file {config_path}: {e}")
+        print(f"FATAL: Error parsing YAML file '{config_path}': {e}")
         exit(1)
 
-# --- Updated make_env to include video recording ---
-def make_env(env_id, idx, gamma, capture_video, run_name, video_trigger):
-    """Creates a function to generate an environment instance, potentially with video recording."""
-    def thunk():
-        env = gym.make(env_id, render_mode="rgb_array" if capture_video and idx == 0 else None)
-        env = gym.wrappers.RecordEpisodeStatistics(env) # Needed for episodic return tracking
+def create_env_factory(env_id, env_idx, cfg, run_name, video_rec_trigger):
+    """Returns a function that creates and appropriately wraps an environment instance."""
+    def _init_env():
+        is_video_env = cfg['capture_video'] and env_idx == 0
+        render_mode = "rgb_array" if is_video_env else None
+        env = gym.make(env_id, render_mode=render_mode)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
 
-        # --- Add video recording wrapper ---
-        if capture_video and idx == 0:
-            # Ensure the videos directory exists
-            os.makedirs(f"videos/{run_name}", exist_ok=True)
-            # Record video based on the trigger function
-            env = gym.wrappers.RecordVideo(
-                env,
-                f"videos/{run_name}",
-                episode_trigger=video_trigger, # Use the provided trigger
-                disable_logger=True # Optional: disable verbose logging from RecordVideo
-            )
-        # --- End video recording addition ---
+        if is_video_env:
+            video_path = f"videos/{run_name}"
+            os.makedirs(video_path, exist_ok=True)
+            env = gym.wrappers.RecordVideo(env, video_path, episode_trigger=video_rec_trigger, disable_logger=True)
 
         env = gym.wrappers.ClipAction(env)
-        env = gym.wrappers.TransformObservation(
-            env,
-            lambda obs: obs / 255.0,
-            observation_space=gym.spaces.Box(low=0.0, high=1.0, shape=env.observation_space.shape, dtype=np.float32)
-        )
-        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        # Normalize observations to [0, 1] and define the new observation space
+        normalized_obs_space = gym.spaces.Box(0.0, 1.0, env.observation_space.shape, np.float32)
+        env = gym.wrappers.TransformObservation(env, lambda obs: obs / 255.0, observation_space=normalized_obs_space)
+        env = gym.wrappers.NormalizeReward(env, gamma=cfg['gamma'])
+        env = gym.wrappers.TransformReward(env, lambda r: np.clip(r, -10, 10)) # Clip rewards
         return env
-    return thunk
+    return _init_env
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    """Initializes weights and biases for a linear layer."""
-    torch.nn.init.orthogonal_(layer.weight, std)
+def init_layer_weights(layer, std_dev=np.sqrt(2), bias_const=0.0):
+    """Initializes layer weights orthogonally and biases to a constant."""
+    torch.nn.init.orthogonal_(layer.weight, std_dev)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class Agent(nn.Module):
-    """PPO Agent with CNN feature extractor for image observations."""
-    def __init__(self, envs):
+class PPOAgent(nn.Module):
+    """PPO Agent: CNN feature extractor + Actor (Normal dist) & Critic heads."""
+    def __init__(self, vectorized_envs):
         super().__init__()
-        obs_shape = envs.single_observation_space.shape
-        cnn_input_shape = (obs_shape[2], obs_shape[0], obs_shape[1])
+        obs_space = vectorized_envs.single_observation_space
+        action_space = vectorized_envs.single_action_space
+        # (H, W, C) -> C for Conv2d input_channels
+        num_channels = obs_space.shape[2]
 
-        self.cnn = nn.Sequential(
-            layer_init(nn.Conv2d(cnn_input_shape[0], 32, 8, stride=4)), nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)), nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)), nn.ReLU(),
+        self.feature_extractor = nn.Sequential(
+            init_layer_weights(nn.Conv2d(num_channels, 32, kernel_size=8, stride=4)), nn.ReLU(),
+            init_layer_weights(nn.Conv2d(32, 64, kernel_size=4, stride=2)), nn.ReLU(),
+            init_layer_weights(nn.Conv2d(64, 64, kernel_size=3, stride=1)), nn.ReLU(),
             nn.Flatten(),
         )
+        # Determine CNN output size for MLP heads
         with torch.no_grad():
-            dummy_input = torch.zeros(1, *obs_shape).permute(0, 3, 1, 2)
-            flattened_size = self.cnn(dummy_input).shape[1]
+            # (N,H,W,C) -> (N,C,H,W) for PyTorch
+            dummy_obs = torch.zeros(1, *obs_space.shape).permute(0, 3, 1, 2)
+            cnn_output_size = self.feature_extractor(dummy_obs).shape[1]
 
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(flattened_size, 512)), nn.ReLU(),
-            layer_init(nn.Linear(512, 1), std=1.0),
+        self.critic_head = nn.Sequential(
+            init_layer_weights(nn.Linear(cnn_output_size, 512)), nn.ReLU(),
+            init_layer_weights(nn.Linear(512, 1), std_dev=1.0),
         )
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(flattened_size, 512)), nn.ReLU(),
-            layer_init(nn.Linear(512, np.prod(envs.single_action_space.shape)), std=0.01),
+        self.actor_mean_head = nn.Sequential(
+            init_layer_weights(nn.Linear(cnn_output_size, 512)), nn.ReLU(),
+            init_layer_weights(nn.Linear(cnn_output_size, np.prod(action_space.shape)), std_dev=0.01),
         )
-        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+        self.actor_log_std_param = nn.Parameter(torch.zeros(1, np.prod(action_space.shape)))
 
-    def get_value(self, x):
-        x = x.permute(0, 3, 1, 2)
-        features = self.cnn(x)
-        return self.critic(features)
+    def _get_features(self, obs_batch: torch.Tensor) -> torch.Tensor:
+        # Permute (N, H, W, C) to (N, C, H, W) for Conv2D
+        return self.feature_extractor(obs_batch.permute(0, 3, 1, 2))
 
-    def get_action_and_value(self, x, action=None):
-        x = x.permute(0, 3, 1, 2)
-        features = self.cnn(x)
-        action_mean = self.actor_mean(features)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
-        if action is None:
-            action = probs.sample()
-        log_prob = probs.log_prob(action).sum(1)
-        entropy = probs.entropy().sum(1)
-        value = self.critic(features)
-        return action, log_prob, entropy, value
+    def get_value(self, obs_batch: torch.Tensor) -> torch.Tensor:
+        return self.critic_head(self._get_features(obs_batch))
+
+    def get_action_and_value(self, obs_batch: torch.Tensor, chosen_action: torch.Tensor = None):
+        features = self._get_features(obs_batch)
+        action_mean = self.actor_mean_head(features)
+        action_log_std = self.actor_log_std_param.expand_as(action_mean)
+        action_std = torch.exp(action_log_std)
+        dist = Normal(action_mean, action_std)
+
+        if chosen_action is None:
+            chosen_action = dist.sample()
+
+        log_prob = dist.log_prob(chosen_action).sum(axis=1) # Sum over action dimensions
+        entropy = dist.entropy().sum(axis=1)      # Sum over action dimensions
+        value = self.critic_head(features)         # Or self.get_value(obs_batch) if features are not passed
+        return chosen_action, log_prob, entropy, value
 
 if __name__ == "__main__":
-    cli_args = parse_args()
-    config = load_config(cli_args.config)
+    args = parse_cli_args()
+    cfg = load_yaml_config(args.config)
 
-    # --- Calculate derived parameters ---
-    num_envs = config['num_envs']
-    num_steps = config['num_steps']
-    num_minibatches = config['num_minibatches']
-    total_timesteps = config['total_timesteps']
-    batch_size = int(num_envs * num_steps)
-    minibatch_size = int(batch_size // num_minibatches)
-    num_iterations = total_timesteps // batch_size
+    # Derived training parameters
+    num_envs = cfg['num_envs']
+    steps_per_rollout = cfg['num_steps']
+    total_timesteps = cfg['total_timesteps']
+    minibatches_per_epoch = cfg['num_minibatches']
 
-    # --- Create run name and directories ---
-    run_name = f"{config['env_id']}__{config['seed']}__{int(time.time())}"
-    run_dir = f"runs/{run_name}"
-    os.makedirs(run_dir, exist_ok=True) # Create directory for saving models
+    batch_size = num_envs * steps_per_rollout
+    minibatch_size = batch_size // minibatches_per_epoch
+    num_train_iterations = total_timesteps // batch_size
 
-    print(f"Running experiment: {run_name}")
-    print(f"Saving models to: {run_dir}")
-    if config['capture_video']:
-        print(f"Saving videos to: videos/{run_name}")
-    print(f"Using device: {'cuda' if torch.cuda.is_available() and config['cuda'] else 'cpu'}")
-    print(f"Hyperparameters: {config}")
+    # Setup run
+    run_name = f"{cfg['env_id']}_PPO-Normal_{cfg['seed']}_{int(time.time())}"
+    model_save_dir = f"runs/{run_name}"
+    os.makedirs(model_save_dir, exist_ok=True)
 
-    # Seeding
-    seed = config['seed']
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = config['torch_deterministic']
+    print(f"--- Experiment: {run_name} ---")
+    print(f"Device: {'cuda' if torch.cuda.is_available() and cfg['cuda'] else 'cpu'}")
+    # print(f"Full config: {cfg}") # Uncomment for verbose config details
 
-    device = torch.device("cuda" if torch.cuda.is_available() and config['cuda'] else "cpu")
+    # Reproducibility
+    random.seed(cfg['seed'])
+    np.random.seed(cfg['seed'])
+    torch.manual_seed(cfg['seed'])
+    torch.backends.cudnn.deterministic = cfg['torch_deterministic']
+    device = torch.device("cuda" if torch.cuda.is_available() and cfg['cuda'] else "cpu")
 
-    # --- Video recording trigger ---
-    # This function determines WHEN to record a video. Records every 'video_frequency' episodes.
-    # Note: RecordVideo wrapper tracks episode counts internally.
-    video_frequency = config['video_frequency']
-    def video_trigger(episode_id):
-         # episode_id is 0-indexed, record for episode 0 and then every video_frequency episodes
-        return episode_id == 0 or (episode_id + 1) % video_frequency == 0
+    # Video recording trigger (records first ep and then every 'video_frequency' episodes)
+    video_rec_trigger = lambda ep_idx: ep_idx == 0 or (ep_idx + 1) % cfg['video_frequency'] == 0
 
-    # --- Environment setup with video trigger ---
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(config['env_id'], i, config['gamma'], config['capture_video'], run_name, video_trigger) for i in range(num_envs)]
-    )
-    assert isinstance(envs.single_action_space, gym.spaces.Box), "Only continuous action space is supported"
+    env_factories = [
+        create_env_factory(cfg['env_id'], i, cfg, run_name, video_rec_trigger)
+        for i in range(num_envs)
+    ]
+    envs = gym.vector.SyncVectorEnv(env_factories)
+    assert isinstance(envs.single_action_space, gym.spaces.Box), "Continuous actions expected."
 
-    agent = Agent(envs).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=config['learning_rate'], eps=1e-5)
+    agent = PPOAgent(envs).to(device)
+    optimizer = optim.Adam(agent.parameters(), lr=cfg['learning_rate'], eps=1e-5)
 
-    # Storage setup
-    obs = torch.zeros((num_steps, num_envs) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((num_steps, num_envs) + envs.single_action_space.shape).to(device)
-    logprobs = torch.zeros((num_steps, num_envs)).to(device)
-    rewards = torch.zeros((num_steps, num_envs)).to(device)
-    dones = torch.zeros((num_steps, num_envs)).to(device)
-    values = torch.zeros((num_steps, num_envs)).to(device)
+    # Rollout data storage
+    obs_buf = torch.zeros((steps_per_rollout, num_envs) + envs.single_observation_space.shape, device=device)
+    action_buf = torch.zeros((steps_per_rollout, num_envs) + envs.single_action_space.shape, device=device)
+    logprob_buf = torch.zeros((steps_per_rollout, num_envs), device=device)
+    reward_buf = torch.zeros((steps_per_rollout, num_envs), device=device)
+    done_buf = torch.zeros((steps_per_rollout, num_envs), device=device)
+    value_buf = torch.zeros((steps_per_rollout, num_envs), device=device)
 
-    # Training loop
-    global_step = 0
-    start_time = time.time()
-    next_obs, _ = envs.reset(seed=seed)
-    next_obs = torch.Tensor(next_obs).to(device)
-    next_done = torch.zeros(num_envs).to(device)
+    # Training loop init
+    global_step_count = 0
+    training_start_time = time.time()
+    next_obs_tensor, _ = envs.reset(seed=cfg['seed'])
+    next_obs_tensor = torch.tensor(next_obs_tensor, dtype=torch.float32).to(device)
+    next_done_tensor = torch.zeros(num_envs, device=device)
 
-    print(f"Starting training for {total_timesteps} timesteps ({num_iterations} iterations)...")
+    print(f"Training for {total_timesteps} timesteps ({num_train_iterations} iterations)...")
 
-    for iteration in tqdm(range(1, num_iterations + 1), desc="Training Progress"):
-        # Learning rate annealing
-        if config['anneal_lr']:
-            frac = 1.0 - (iteration - 1.0) / num_iterations
-            lrnow = frac * config['learning_rate']
-            optimizer.param_groups[0]["lr"] = lrnow
+    for iteration in tqdm(range(1, num_train_iterations + 1), desc="PPO Iteration"):
+        if cfg['anneal_lr']:
+            lr_frac = 1.0 - (iteration - 1.0) / num_train_iterations
+            optimizer.param_groups[0]["lr"] = lr_frac * cfg['learning_rate']
 
-        # Rollout phase
-        for step in range(0, num_steps):
-            global_step += num_envs
-            obs[step] = next_obs
-            dones[step] = next_done
+        # --- Collect Rollout ---
+        agent.eval()
+        for step in range(steps_per_rollout):
+            global_step_count += num_envs
+            obs_buf[step] = next_obs_tensor
+            done_buf[step] = next_done_tensor
 
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
-                values[step] = value.flatten()
-            actions[step] = action
-            logprobs[step] = logprob
+                actions, log_probs, _, values = agent.get_action_and_value(next_obs_tensor)
+                value_buf[step] = values.flatten()
+            action_buf[step] = actions
+            logprob_buf[step] = log_probs
 
-            next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
-            next_done = np.logical_or(terminations, truncations)
-            rewards[step] = torch.tensor(reward).to(device).view(-1)
-            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+            next_obs_np, rewards_np, terminated_np, truncated_np, infos = envs.step(actions.cpu().numpy())
+            next_done_np = np.logical_or(terminated_np, truncated_np)
 
-            if "final_info" in infos:
-                for info in infos.get("final_info", []):
-                    if info and "episode" in info:
-                        tqdm.write(f"  global_step={global_step}, episodic_return={info['episode']['r']:.2f}")
+            reward_buf[step] = torch.tensor(rewards_np, device=device).view(-1)
+            next_obs_tensor = torch.tensor(next_obs_np, dtype=torch.float32).to(device)
+            next_done_tensor = torch.tensor(next_done_np, dtype=torch.float32, device=device)
 
-        # Bootstrap value and compute advantages
+            for item in infos.get("final_info", []):
+                if item and "episode" in item: # Check if episode stats are available
+                    tqdm.write(f"  step={global_step_count}, ep_return={item['episode']['r']:.2f}")
+
+        # --- Compute Advantages (GAE) & Returns ---
+        agent.eval()
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
-            advantages = torch.zeros_like(rewards).to(device)
-            lastgaelam = 0
-            gamma = config['gamma']
-            gae_lambda = config['gae_lambda']
-            for t in reversed(range(num_steps)):
-                if t == num_steps - 1:
-                    nextnonterminal = 1.0 - next_done
-                    nextvalues = next_value
+            next_values_pred = agent.get_value(next_obs_tensor).reshape(1, -1)
+            advantages = torch.zeros_like(reward_buf, device=device)
+            last_gae_lambda = 0
+            for t in reversed(range(steps_per_rollout)):
+                next_not_done = 1.0 - (next_done_tensor if t == steps_per_rollout - 1 else done_buf[t + 1])
+                current_values = value_buf[t]
+                next_step_values = next_values_pred if t == steps_per_rollout - 1 else value_buf[t+1]
+
+                delta = reward_buf[t] + cfg['gamma'] * next_step_values * next_not_done - current_values
+                advantages[t] = last_gae_lambda = delta + cfg['gamma'] * cfg['gae_lambda'] * next_not_done * last_gae_lambda
+            returns = advantages + value_buf
+
+        # Flatten batch data
+        b_obs, b_logprobs, b_actions, b_advantages, b_returns, b_values = (
+            x.reshape((-1,) + x.shape[2:]) if x.ndim > 2 else x.reshape(-1)
+            for x in (obs_buf, logprob_buf, action_buf, advantages, returns, value_buf)
+        )
+
+        # --- PPO Update Epochs ---
+        agent.train()
+        batch_indices = np.arange(batch_size)
+        for epoch in range(cfg['update_epochs']):
+            np.random.shuffle(batch_indices)
+            for start_idx in range(0, batch_size, minibatch_size):
+                mb_indices = batch_indices[start_idx : start_idx + minibatch_size]
+
+                _, new_logprobs, entropy, new_values = agent.get_action_and_value(
+                    b_obs[mb_indices], b_actions[mb_indices]
+                )
+                log_ratio = new_logprobs - b_logprobs[mb_indices]
+                ratio = torch.exp(log_ratio)
+
+                mb_adv = b_advantages[mb_indices]
+                if cfg['norm_adv']:
+                    mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
+
+                # Policy Loss
+                pg_loss1 = -mb_adv * ratio
+                pg_loss2 = -mb_adv * torch.clamp(ratio, 1 - cfg['clip_coef'], 1 + cfg['clip_coef'])
+                policy_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+                # Value Loss
+                new_values = new_values.view(-1)
+                if cfg['clip_vloss']:
+                    v_loss_unclipped = (new_values - b_returns[mb_indices]) ** 2
+                    v_clipped = b_values[mb_indices] + torch.clamp(
+                        new_values - b_values[mb_indices], -cfg['clip_coef'], cfg['clip_coef']
+                    )
+                    v_loss_clipped = (v_clipped - b_returns[mb_indices]) ** 2
+                    value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
                 else:
-                    nextnonterminal = 1.0 - dones[t + 1]
-                    nextvalues = values[t + 1]
-                delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
-            returns = advantages + values
+                    value_loss = 0.5 * ((new_values - b_returns[mb_indices]) ** 2).mean()
 
-        # Flatten batch for training
-        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
-        b_logprobs = logprobs.reshape(-1)
-        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
-        b_advantages = advantages.reshape(-1)
-        b_returns = returns.reshape(-1)
-        b_values = values.reshape(-1)
-
-        # Update phase
-        b_inds = np.arange(batch_size)
-        update_epochs = config['update_epochs']
-        clip_coef = config['clip_coef']
-        norm_adv = config['norm_adv']
-        clip_vloss = config['clip_vloss']
-        ent_coef = config['ent_coef']
-        vf_coef = config['vf_coef']
-        max_grad_norm = config['max_grad_norm']
-        target_kl = config['target_kl']
-        pg_losses, v_losses, entropy_losses, approx_kls = [], [], [], []
-
-        for epoch in range(update_epochs):
-            np.random.shuffle(b_inds)
-            for start in range(0, batch_size, minibatch_size):
-                end = start + minibatch_size
-                mb_inds = b_inds[start:end]
-
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
-                logratio = newlogprob - b_logprobs[mb_inds]
-                ratio = logratio.exp()
-
-                with torch.no_grad():
-                    approx_kl = ((ratio - 1) - logratio).mean()
-                    approx_kls.append(approx_kl.item())
-
-                mb_advantages = b_advantages[mb_inds]
-                if norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-                pg_losses.append(pg_loss.item())
-
-                newvalue = newvalue.view(-1)
-                if clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(newvalue - b_values[mb_inds], -clip_coef, clip_coef)
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-                else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
-                v_losses.append(v_loss.item())
-
-                entropy_loss = entropy.mean()
-                entropy_losses.append(entropy_loss.item())
-
-                loss = pg_loss - ent_coef * entropy_loss + v_loss * vf_coef
+                entropy_bonus = entropy.mean()
+                total_loss = policy_loss - cfg['ent_coef'] * entropy_bonus + cfg['vf_coef'] * value_loss
 
                 optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+                total_loss.backward()
+                nn.utils.clip_grad_norm_(agent.parameters(), cfg['max_grad_norm'])
                 optimizer.step()
 
-            if target_kl is not None and np.mean(approx_kls[-len(b_inds)//minibatch_size:]) > target_kl:
-                tqdm.write(f"  Early stopping at epoch {epoch+1} due to reaching max KL: {np.mean(approx_kls[-len(b_inds)//minibatch_size:]):.4f}")
-                break
+            # Optional: KL-divergence early stopping (more involved to track approx_kl per minibatch accurately)
+            # if cfg.get('target_kl') and np.mean(approx_kls_epoch) > cfg['target_kl']: break
 
-        y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
-        var_y = np.var(y_true)
-        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-
-    # --- Add model saving logic ---
-    if config['save_model']:
-        # Ensure the directory exists (it should, but double-check)
-        os.makedirs(run_dir, exist_ok=True)
-        # Define the model path with .pt extension
-        model_path = os.path.join(run_dir, f"{run_name}.pt")
-        # Save the agent's state dictionary
+    # --- Save final model & cleanup ---
+    if cfg['save_model']:
+        model_path = os.path.join(model_save_dir, f"{run_name}_final.pt")
         torch.save(agent.state_dict(), model_path)
         print(f"\nModel saved to {model_path}")
-    # --- End model saving logic ---
 
     envs.close()
-    print("\nTraining finished.")
-    print(f"Total time: {(time.time() - start_time)/60:.2f} minutes")
+    print(f"\n--- Training Finished ---\nTotal time: {(time.time() - training_start_time)/60:.2f} minutes")
