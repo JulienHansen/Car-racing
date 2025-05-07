@@ -1,30 +1,22 @@
-# PPO for CarRacing-v3 using YAML config, tqdm, saving, video, MANUAL grayscale, and MANUAL frame stacking
 import os
 import random
 import time
 import argparse
 import yaml
+import math
 from tqdm import tqdm
-from collections import deque # Needed for manual frame stacking buffer
+from collections import deque 
 
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.distributions.normal import Normal
-
-# --- Import base wrapper classes ---
+from torch.distributions.beta import Beta
 from gymnasium import ObservationWrapper, Wrapper
-# Removed GrayScaleObservation import
 
-# --- Custom Manual Grayscale Wrapper ---
-class ManualGrayScaleObservation(ObservationWrapper):
-    """
-    Manually converts an RGB observation to grayscale using luminosity method.
-    Assumes input observation shape is (H, W, 3).
-    Outputs observation shape (H, W, 1).
-    """
+
+class GrayScaleObservation(ObservationWrapper):
     def __init__(self, env: gym.Env):
         super().__init__(env)
         # Check the original observation space (should be float after TransformObservation)
@@ -52,7 +44,7 @@ class ManualGrayScaleObservation(ObservationWrapper):
         return np.expand_dims(gray, axis=-1).astype(np.float32)
 
 # --- Custom Manual Frame Stacking Wrapper (remains the same) ---
-class ManualFrameStack(ObservationWrapper):
+class FrameStack(ObservationWrapper):
     """
     Manually stacks observations along the last dimension (channels).
     Assumes observations are numpy arrays with shape (H, W, C).
@@ -167,11 +159,11 @@ def make_env(env_id, idx, gamma, capture_video, run_name, video_trigger, frame_s
 
         # Apply manual grayscale conversion
         # This MUST come before ManualFrameStack
-        env = ManualGrayScaleObservation(env) # This wrapper defines its own output space
+        env = GrayScaleObservation(env) # This wrapper defines its own output space
 
         # Use the custom ManualFrameStack wrapper if frame_stack > 1
         if frame_stack > 1:
-            env = ManualFrameStack(env, num_stack=frame_stack) # This wrapper defines its own output space
+            env = FrameStack(env, num_stack=frame_stack) # This wrapper defines its own output space
         # If frame_stack is 1, the observation remains (H, W, 1) from grayscale
 
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
@@ -185,13 +177,12 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-# --- Agent class remains the same, it adapts to the input shape ---
 class Agent(nn.Module):
     """PPO Agent with CNN feature extractor for image observations (handles frame stacking)."""
     def __init__(self, envs):
         super().__init__()
         obs_shape = envs.single_observation_space.shape
-        num_input_channels = obs_shape[-1] # Will be frame_stack or 1
+        num_input_channels = obs_shape[-1]  # Will be frame_stack or 1
         print(f"Agent initialized with input shape: {obs_shape} -> CNN channels: {num_input_channels}")
 
         self.cnn = nn.Sequential(
@@ -201,40 +192,63 @@ class Agent(nn.Module):
             nn.Flatten(),
         )
         with torch.no_grad():
-            dummy_input = torch.zeros(1, *envs.single_observation_space.shape).permute(0, 3, 1, 2)
-            flattened_size = self.cnn(dummy_input).shape[1]
+            dummy = torch.zeros(1, *envs.single_observation_space.shape).permute(0, 3, 1, 2)
+            flattened_size = self.cnn(dummy).shape[1]
             print(f"CNN flattened output size: {flattened_size}")
 
+        # Critic head
         self.critic = nn.Sequential(
             layer_init(nn.Linear(flattened_size, 512)), nn.ReLU(),
             layer_init(nn.Linear(512, 1), std=1.0),
         )
-        self.actor_mean = nn.Sequential(
+
+        # ===== Beta policy heads =====
+        action_dim = int(np.prod(envs.single_action_space.shape))
+        # α‐head
+        self.actor_alpha = nn.Sequential(
             layer_init(nn.Linear(flattened_size, 512)), nn.ReLU(),
-            layer_init(nn.Linear(512, np.prod(envs.single_action_space.shape)), std=0.01),
+            layer_init(nn.Linear(512, action_dim), std=0.01),
+            nn.Softplus(),  # ensure α > 0
         )
-        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+        # β‐head
+        self.actor_beta = nn.Sequential(
+            layer_init(nn.Linear(flattened_size, 512)), nn.ReLU(),
+            layer_init(nn.Linear(512, action_dim), std=0.01),
+            nn.Softplus(),  # ensure β > 0
+        )
 
     def get_value(self, x):
-        """Returns the estimated value of the state."""
-        x = x.permute(0, 3, 1, 2) # (N, H, W, C*stack) -> (N, C*stack, H, W)
+        x = x.permute(0, 3, 1, 2)  # (N, H, W, C*stack) -> (N, C*stack, H, W)
         features = self.cnn(x)
         return self.critic(features)
 
     def get_action_and_value(self, x, action=None):
-        """Returns action, log probability, entropy, and value for a state."""
-        x = x.permute(0, 3, 1, 2) # (N, H, W, C*stack) -> (N, C*stack, H, W)
+        x = x.permute(0, 3, 1, 2)
         features = self.cnn(x)
-        action_mean = self.actor_mean(features)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
-        if action is None:
-            action = probs.sample()
-        log_prob = probs.log_prob(action).sum(1)
-        entropy = probs.entropy().sum(1)
+
+        # get α, β
+        alpha = self.actor_alpha(features)
+        beta  = self.actor_beta(features)
+        dist  = Beta(alpha, beta)
+
+        # sample u ∈ [0,1]
+        u = dist.rsample() if self.training else dist.sample()
+
+        # map to action space:
+        # steering (u[:,0]) → [-1,1], others stay in [0,1]
+        steering = u[:, 0] * 2.0 - 1.0
+        others   = u[:, 1:]
+        action   = torch.cat([steering.unsqueeze(-1), others], dim=-1)
+
+        # log-prob + Jacobian for steering scale=2
+        log_prob_u = dist.log_prob(u).sum(-1)
+        log_prob   = log_prob_u - math.log(2.0)
+        entropy    = dist.entropy().sum(-1)
+
         value = self.critic(features)
         return action, log_prob, entropy, value
+
+
 
 if __name__ == "__main__":
     cli_args = parse_args()

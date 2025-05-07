@@ -1,257 +1,329 @@
+# Simplified PPO for CarRacing-v3 using YAML config, tqdm, saving, and video
+import os
+import random
+import time
+import argparse
+import yaml
+from tqdm import tqdm
+
 import gymnasium as gym
 import numpy as np
-import cv2  # OpenCV for image preprocessing
 import torch
-from torch import nn, optim
-from torch.distributions import Beta
-from torch.utils.data import DataLoader, Dataset
-from collections import deque
-from time import sleep
-from os.path import join
+import torch.nn as nn
+import torch.optim as optim
+from torch.distributions.normal import Normal
 
+def parse_args():
+    """Parses command-line arguments."""
+    parser = argparse.ArgumentParser(description="PPO agent for CarRacing-v3 with YAML config")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="cfg_ppo.yaml",
+        help="Path to the YAML configuration file",
+    )
+    return parser.parse_args()
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def load_config(config_path):
+    """Loads configuration from a YAML file."""
+    try:
+        with open(config_path, 'r') as f:
+            # Ensure boolean values are parsed correctly
+            config = yaml.load(f, Loader=yaml.FullLoader)
+        print(f"Loaded configuration from {config_path}")
+        # Default values for new options if missing in file
+        config.setdefault('save_model', False)
+        config.setdefault('capture_video', False)
+        config.setdefault('video_frequency', 50) # Default frequency if not set
+        return config
+    except FileNotFoundError:
+        print(f"Error: Configuration file not found at {config_path}")
+        exit(1)
+    except yaml.YAMLError as e:
+        print(f"Error parsing YAML file {config_path}: {e}")
+        exit(1)
 
-# ----------------- Memory Dataset ----------------- #
-class Memory(Dataset):
-    def __init__(self, *data):
-        self.data = data
+# --- Updated make_env to include video recording ---
+def make_env(env_id, idx, gamma, capture_video, run_name, video_trigger):
+    """Creates a function to generate an environment instance, potentially with video recording."""
+    def thunk():
+        env = gym.make(env_id, render_mode="rgb_array" if capture_video and idx == 0 else None)
+        env = gym.wrappers.RecordEpisodeStatistics(env) # Needed for episodic return tracking
 
-    def __len__(self):
-        return len(self.data[0])
+        # --- Add video recording wrapper ---
+        if capture_video and idx == 0:
+            # Ensure the videos directory exists
+            os.makedirs(f"videos/{run_name}", exist_ok=True)
+            # Record video based on the trigger function
+            env = gym.wrappers.RecordVideo(
+                env,
+                f"videos/{run_name}",
+                episode_trigger=video_trigger, # Use the provided trigger
+                disable_logger=True # Optional: disable verbose logging from RecordVideo
+            )
+        # --- End video recording addition ---
 
-    def __getitem__(self, idx):
-        return tuple(d[idx] for d in self.data)
+        env = gym.wrappers.ClipAction(env)
+        env = gym.wrappers.TransformObservation(
+            env,
+            lambda obs: obs / 255.0,
+            observation_space=gym.spaces.Box(low=0.0, high=1.0, shape=env.observation_space.shape, dtype=np.float32)
+        )
+        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
+        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        return env
+    return thunk
 
-# ------------- Convolutional Policy Network ------------- #
-class ConvPolicyNetwork(nn.Module):
-    def __init__(self, input_channels: int, num_actions: int, hidden_dim: int = 128):
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    """Initializes weights and biases for a linear layer."""
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+class Agent(nn.Module):
+    """PPO Agent with CNN feature extractor for image observations."""
+    def __init__(self, envs):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(input_channels, 32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
+        obs_shape = envs.single_observation_space.shape
+        cnn_input_shape = (obs_shape[2], obs_shape[0], obs_shape[1])
+
+        self.cnn = nn.Sequential(
+            layer_init(nn.Conv2d(cnn_input_shape[0], 32, 8, stride=4)), nn.ReLU(),
+            layer_init(nn.Conv2d(32, 64, 4, stride=2)), nn.ReLU(),
+            layer_init(nn.Conv2d(64, 64, 3, stride=1)), nn.ReLU(),
+            nn.Flatten(),
         )
         with torch.no_grad():
-            dummy = torch.zeros(1, input_channels, 96, 96)
-            conv_out = self.conv(dummy)
-            conv_size = conv_out.view(1, -1).size(1)
-        self.fc = nn.Sequential(
-            nn.Linear(conv_size, hidden_dim),
-            nn.ReLU(),
+            dummy_input = torch.zeros(1, *obs_shape).permute(0, 3, 1, 2)
+            flattened_size = self.cnn(dummy_input).shape[1]
+
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(flattened_size, 512)), nn.ReLU(),
+            layer_init(nn.Linear(512, 1), std=1.0),
         )
-        self.value_head = nn.Linear(hidden_dim, 1)
-        self.alpha_head = nn.Sequential(
-            nn.Linear(hidden_dim, num_actions),
-            nn.Softplus()
+        self.actor_mean = nn.Sequential(
+            layer_init(nn.Linear(flattened_size, 512)), nn.ReLU(),
+            layer_init(nn.Linear(512, np.prod(envs.single_action_space.shape)), std=0.01),
         )
-        self.beta_head = nn.Sequential(
-            nn.Linear(hidden_dim, num_actions),
-            nn.Softplus()
-        )
+        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
-    def forward(self, x):
-        x = self.conv(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
-        value = self.value_head(x)
-        alpha = self.alpha_head(x) + 1e-5
-        beta = self.beta_head(x) + 1e-5
-        return value, alpha, beta
+    def get_value(self, x):
+        x = x.permute(0, 3, 1, 2)
+        features = self.cnn(x)
+        return self.critic(features)
 
-# -------------- PPO Agent -------------- #
-class PPO:
-    def __init__(self, env, net, lr=1e-3, batch_size=128, gamma=0.99, gae_lambda=0.95, 
-                 horizon=1024, epochs_per_step=10, num_steps=1000, clip=0.2, 
-                 value_coef=0.5, entropy_coef=0.001, save_dir="ckpt", save_interval=100,
-                 frame_skip=1, stack_size=4):
+    def get_action_and_value(self, x, action=None):
+        x = x.permute(0, 3, 1, 2)
+        features = self.cnn(x)
+        action_mean = self.actor_mean(features)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        if action is None:
+            action = probs.sample()
+        log_prob = probs.log_prob(action).sum(1)
+        entropy = probs.entropy().sum(1)
+        value = self.critic(features)
+        return action, log_prob, entropy, value
 
-        self.env = env
-        self.net = net.to(device)
-        self.lr = lr
-        self.batch_size = batch_size
-        self.gamma = gamma
-        self.gae_lambda = gae_lambda
-        self.horizon = horizon
-        self.epochs_per_step = epochs_per_step
-        self.num_steps = num_steps
-        self.clip = clip
-        self.value_coef = value_coef
-        self.entropy_coef = entropy_coef
-        self.save_dir = save_dir
-        self.save_interval = save_interval
-        self.frame_skip = frame_skip
-        self.stack_size = stack_size
+if __name__ == "__main__":
+    cli_args = parse_args()
+    config = load_config(cli_args.config)
 
-        self.optim = optim.Adam(self.net.parameters(), lr=self.lr)
+    # --- Calculate derived parameters ---
+    num_envs = config['num_envs']
+    num_steps = config['num_steps']
+    num_minibatches = config['num_minibatches']
+    total_timesteps = config['total_timesteps']
+    batch_size = int(num_envs * num_steps)
+    minibatch_size = int(batch_size // num_minibatches)
+    num_iterations = total_timesteps // batch_size
 
-        obs, _ = env.reset()
-        init_frame = self._preprocess(obs)
-        self.state_stack = deque([init_frame.copy() for _ in range(stack_size)], maxlen=stack_size)
-        self.state = self._get_state()
-        self.alpha = 1.0
+    # --- Create run name and directories ---
+    run_name = f"{config['env_id']}__{config['seed']}__{int(time.time())}"
+    run_dir = f"runs/{run_name}"
+    os.makedirs(run_dir, exist_ok=True) # Create directory for saving models
 
-    def train(self):
-        for step in range(self.num_steps):
-            self._set_step_params(step)
-            with torch.no_grad():
-                memory = self.collect_trajectory(self.horizon)
+    print(f"Running experiment: {run_name}")
+    print(f"Saving models to: {run_dir}")
+    if config['capture_video']:
+        print(f"Saving videos to: videos/{run_name}")
+    print(f"Using device: {'cuda' if torch.cuda.is_available() and config['cuda'] else 'cpu'}")
+    print(f"Hyperparameters: {config}")
 
-            total_reward = memory.data[3].sum().item()
-            print(f"Step {step}: Total Reward: {total_reward:.2f}")
+    # Seeding
+    seed = config['seed']
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = config['torch_deterministic']
 
-            memory_loader = DataLoader(memory, batch_size=self.batch_size, shuffle=True)
-            avg_loss = 0.0
-            for epoch in range(self.epochs_per_step):
-                for states, actions, old_log_probs, rewards, advantages, old_values in memory_loader:
-                    loss, ploss, vloss, eloss = self.train_batch(states, actions, old_log_probs, rewards, advantages, old_values)
-                    avg_loss += loss
+    device = torch.device("cuda" if torch.cuda.is_available() and config['cuda'] else "cpu")
 
-            avg_loss /= (self.epochs_per_step * len(memory_loader))
-            print(f"Step {step}: Loss: {avg_loss:.6f}")
+    # --- Video recording trigger ---
+    # This function determines WHEN to record a video. Records every 'video_frequency' episodes.
+    # Note: RecordVideo wrapper tracks episode counts internally.
+    video_frequency = config['video_frequency']
+    def video_trigger(episode_id):
+         # episode_id is 0-indexed, record for episode 0 and then every video_frequency episodes
+        return episode_id == 0 or (episode_id + 1) % video_frequency == 0
 
-            if step % self.save_interval == 0:
-                self.save(join(self.save_dir, f"net_{step}.pth"))
-
-        self.save(join(self.save_dir, "net_final.pth"))
-
-    def train_batch(self, states, old_actions, old_log_probs, rewards, advantages, old_values):
-        self.optim.zero_grad()
-        values, alpha, beta = self.net(states)
-        values = values.squeeze(1)
-        alpha = alpha.clamp(min=1e-3)
-        beta = beta.clamp(min=1e-3)
-
-        policy = Beta(alpha, beta)
-        entropy = policy.entropy().mean()
-        log_probs = policy.log_prob(old_actions.clamp(1e-6, 1 - 1e-6)).sum(dim=1)
-        ratio = (log_probs - old_log_probs.detach()).exp()
-
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        policy_loss = -torch.min(ratio * advantages, ratio.clamp(1 - self.clip, 1 + self.clip) * advantages).mean()
-
-        value_target = advantages * self.gae_lambda + old_values
-        value_loss = nn.MSELoss()(values, value_target)
-        entropy_loss = -entropy
-
-        loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
-        loss.backward()
-        self.optim.step()
-
-        return loss.item(), policy_loss.item(), value_loss.item(), entropy_loss.item()
-
-    def collect_trajectory(self, num_steps):
-        states, actions, rewards, log_probs, values, dones = [], [], [], [], [], []
-
-        for _ in range(num_steps):
-            value, alpha, beta = self.net(self.state)
-            value, alpha, beta = value.squeeze(0), alpha.squeeze(0), beta.squeeze(0)
-            alpha = alpha.clamp(min=1e-3)
-            beta = beta.clamp(min=1e-3)
-
-            policy = Beta(alpha, beta)
-            action = policy.sample().clamp(0.0, 1.0)
-            log_prob = policy.log_prob(action.clamp(1e-6, 1 - 1e-6)).sum()
-
-            cumulative_reward = 0.0
-            done = False
-            for _ in range(self.frame_skip):
-                obs, reward, terminated, truncated, _ = self.env.step(action.cpu().numpy())
-                done = terminated or truncated
-                cumulative_reward += reward
-                if done:
-                    break
-                frame = self._preprocess(obs)
-                self.state_stack.append(frame)
-            if done:
-                obs, _ = self.env.reset()
-                frame = self._preprocess(obs)
-                self.state_stack = deque([frame.copy() for _ in range(self.stack_size)], maxlen=self.stack_size)
-            else:
-                frame = self._preprocess(obs)
-                self.state_stack.append(frame)
-
-            next_state = self._get_state()
-            states.append(self.state)
-            actions.append(action)
-            rewards.append(cumulative_reward)
-            log_probs.append(log_prob)
-            values.append(value)
-            dones.append(done)
-            self.state = next_state
-
-        final_value, _, _ = self.net(self.state)
-        final_value = final_value.squeeze(0)
-        advantages = self._compute_gae(rewards, values, dones, final_value)
-
-        return Memory(
-            torch.cat(states),
-            torch.stack(actions),
-            torch.stack(log_probs),
-            torch.tensor(rewards, dtype=torch.float32, device=device),
-            torch.tensor(advantages, dtype=torch.float32, device=device),
-            torch.cat(values)
-        )
-
-    def _compute_gae(self, rewards, values, dones, last_value):
-        advantages = [0.0] * len(rewards)
-        last_advantage = 0.0
-        for i in reversed(range(len(rewards))):
-            delta = rewards[i] + (1 - dones[i]) * self.gamma * last_value - values[i].item()
-            advantages[i] = delta + (1 - dones[i]) * self.gamma * self.gae_lambda * last_advantage
-            last_value = values[i].item()
-            last_advantage = advantages[i]
-        return advantages
-
-    def _preprocess(self, obs):
-        obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
-        obs = cv2.resize(obs, (96, 96))
-        obs = np.array(obs, dtype=np.float32) / 255.0
-        return obs[np.newaxis, ...]
-
-    def _get_state(self):
-        state = np.concatenate(list(self.state_stack), axis=0)
-        return self._to_tensor(state)
-
-    def _to_tensor(self, x):
-        return torch.tensor(x, dtype=torch.float32, device=device).unsqueeze(0)
-
-    def _set_step_params(self, step):
-        self.alpha = 1.0 - step / self.num_steps
-        for param_group in self.optim.param_groups:
-            param_group["lr"] = self.lr * self.alpha
-        print(f"Learning Rate: {self.optim.param_groups[0]['lr']:.8f}")
-
-    def save(self, filepath):
-        import os
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        torch.save(self.net.state_dict(), filepath)
-        print(f"Model saved to {filepath}")
-
-# ------------------ Main ------------------ #
-if __name__ == '__main__':
-    env = gym.make("CarRacing-v3", continuous=True)
-    env.reset()
-
-    input_channels = 4
-    num_actions = env.action_space.shape[0]
-
-    net = ConvPolicyNetwork(input_channels=input_channels, num_actions=num_actions, hidden_dim=128)
-    ppo_agent = PPO(
-        env,
-        net,
-        num_steps=1000,
-        horizon=512,
-        frame_skip=4,
-        stack_size=4
+    # --- Environment setup with video trigger ---
+    envs = gym.vector.SyncVectorEnv(
+        [make_env(config['env_id'], i, config['gamma'], config['capture_video'], run_name, video_trigger) for i in range(num_envs)]
     )
+    assert isinstance(envs.single_action_space, gym.spaces.Box), "Only continuous action space is supported"
 
-    try:
-        ppo_agent.train()
-    except KeyboardInterrupt:
-        print("Training interrupted.")
-    finally:
-        env.close()
+    agent = Agent(envs).to(device)
+    optimizer = optim.Adam(agent.parameters(), lr=config['learning_rate'], eps=1e-5)
+
+    # Storage setup
+    obs = torch.zeros((num_steps, num_envs) + envs.single_observation_space.shape).to(device)
+    actions = torch.zeros((num_steps, num_envs) + envs.single_action_space.shape).to(device)
+    logprobs = torch.zeros((num_steps, num_envs)).to(device)
+    rewards = torch.zeros((num_steps, num_envs)).to(device)
+    dones = torch.zeros((num_steps, num_envs)).to(device)
+    values = torch.zeros((num_steps, num_envs)).to(device)
+
+    # Training loop
+    global_step = 0
+    start_time = time.time()
+    next_obs, _ = envs.reset(seed=seed)
+    next_obs = torch.Tensor(next_obs).to(device)
+    next_done = torch.zeros(num_envs).to(device)
+
+    print(f"Starting training for {total_timesteps} timesteps ({num_iterations} iterations)...")
+
+    for iteration in tqdm(range(1, num_iterations + 1), desc="Training Progress"):
+        # Learning rate annealing
+        if config['anneal_lr']:
+            frac = 1.0 - (iteration - 1.0) / num_iterations
+            lrnow = frac * config['learning_rate']
+            optimizer.param_groups[0]["lr"] = lrnow
+
+        # Rollout phase
+        for step in range(0, num_steps):
+            global_step += num_envs
+            obs[step] = next_obs
+            dones[step] = next_done
+
+            with torch.no_grad():
+                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                values[step] = value.flatten()
+            actions[step] = action
+            logprobs[step] = logprob
+
+            next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            next_done = np.logical_or(terminations, truncations)
+            rewards[step] = torch.tensor(reward).to(device).view(-1)
+            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+
+            if "final_info" in infos:
+                for info in infos.get("final_info", []):
+                    if info and "episode" in info:
+                        tqdm.write(f"  global_step={global_step}, episodic_return={info['episode']['r']:.2f}")
+
+        # Bootstrap value and compute advantages
+        with torch.no_grad():
+            next_value = agent.get_value(next_obs).reshape(1, -1)
+            advantages = torch.zeros_like(rewards).to(device)
+            lastgaelam = 0
+            gamma = config['gamma']
+            gae_lambda = config['gae_lambda']
+            for t in reversed(range(num_steps)):
+                if t == num_steps - 1:
+                    nextnonterminal = 1.0 - next_done
+                    nextvalues = next_value
+                else:
+                    nextnonterminal = 1.0 - dones[t + 1]
+                    nextvalues = values[t + 1]
+                delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
+                advantages[t] = lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
+            returns = advantages + values
+
+        # Flatten batch for training
+        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
+        b_logprobs = logprobs.reshape(-1)
+        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        b_advantages = advantages.reshape(-1)
+        b_returns = returns.reshape(-1)
+        b_values = values.reshape(-1)
+
+        # Update phase
+        b_inds = np.arange(batch_size)
+        update_epochs = config['update_epochs']
+        clip_coef = config['clip_coef']
+        norm_adv = config['norm_adv']
+        clip_vloss = config['clip_vloss']
+        ent_coef = config['ent_coef']
+        vf_coef = config['vf_coef']
+        max_grad_norm = config['max_grad_norm']
+        target_kl = config['target_kl']
+        pg_losses, v_losses, entropy_losses, approx_kls = [], [], [], []
+
+        for epoch in range(update_epochs):
+            np.random.shuffle(b_inds)
+            for start in range(0, batch_size, minibatch_size):
+                end = start + minibatch_size
+                mb_inds = b_inds[start:end]
+
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                logratio = newlogprob - b_logprobs[mb_inds]
+                ratio = logratio.exp()
+
+                with torch.no_grad():
+                    approx_kl = ((ratio - 1) - logratio).mean()
+                    approx_kls.append(approx_kl.item())
+
+                mb_advantages = b_advantages[mb_inds]
+                if norm_adv:
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+
+                pg_loss1 = -mb_advantages * ratio
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                pg_losses.append(pg_loss.item())
+
+                newvalue = newvalue.view(-1)
+                if clip_vloss:
+                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                    v_clipped = b_values[mb_inds] + torch.clamp(newvalue - b_values[mb_inds], -clip_coef, clip_coef)
+                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                    v_loss = 0.5 * v_loss_max.mean()
+                else:
+                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                v_losses.append(v_loss.item())
+
+                entropy_loss = entropy.mean()
+                entropy_losses.append(entropy_loss.item())
+
+                loss = pg_loss - ent_coef * entropy_loss + v_loss * vf_coef
+
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
+                optimizer.step()
+
+            if target_kl is not None and np.mean(approx_kls[-len(b_inds)//minibatch_size:]) > target_kl:
+                tqdm.write(f"  Early stopping at epoch {epoch+1} due to reaching max KL: {np.mean(approx_kls[-len(b_inds)//minibatch_size:]):.4f}")
+                break
+
+        y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
+        var_y = np.var(y_true)
+        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+
+    # --- Add model saving logic ---
+    if config['save_model']:
+        # Ensure the directory exists (it should, but double-check)
+        os.makedirs(run_dir, exist_ok=True)
+        # Define the model path with .pt extension
+        model_path = os.path.join(run_dir, f"{run_name}.pt")
+        # Save the agent's state dictionary
+        torch.save(agent.state_dict(), model_path)
+        print(f"\nModel saved to {model_path}")
+    # --- End model saving logic ---
+
+    envs.close()
+    print("\nTraining finished.")
+    print(f"Total time: {(time.time() - start_time)/60:.2f} minutes")
