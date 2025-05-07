@@ -1,33 +1,47 @@
-# Configuration for Simplified PPO for CarRacing-v3
+# cfg_ddpg.yaml
+# Configuration for DDPG Agent on CarRacing-v3
 
-seed: 1
-torch_deterministic: True
-cuda: True
-env_id: "CarRacing-v3"
+# --- General Experiment Settings ---
+env_id: 'CarRacing-v3'
+seed: 42
+device: 'cuda'               # 'cuda' or 'cpu'
+torch_deterministic: True    # For reproducibility, can affect performance
+gym_logger_level: 40         # Set gym logger level (40 for ERROR)
 
-save_model: True # Enable/disable saving the final model
-capture_video: True # Enable/disable video recording
-video_frequency: 50 # Record a video every N iterations (e.g., 50)
+# --- Training Control ---
+n_episodes: 1000             # Total number of training episodes
+max_steps_per_episode: 1000  # Maximum steps allowed within one episode
+render_during_training: False # Render environment during training (can slow it down)
 
+# --- DDPG Algorithm Parameters ---
+ddpg_params: # Nested dictionary for DDPG specific parameters
+  gamma: 0.99                # Discount factor for future rewards
+  tau: 0.005                 # Soft update rate for target networks
+  actor_lr: 0.0001           # Learning rate for the actor network
+  critic_lr: 0.001           # Learning rate for the critic network
 
-frame_stack: 4
+# --- Replay Buffer (Prioritized Experience Replay - PER) ---
+replay_buffer_params: # Nested dictionary for replay buffer parameters
+  type: 'per'                # Type of replay buffer ('per' is implemented)
+  capacity: 131072           # Capacity of the replay buffer (e.g., 2**17)
+  batch_size: 64             # Batch size for training updates
+  # PER specific parameters (used if type is 'per')
+  alpha: 0.6                 # Prioritization exponent (0=uniform, 1=full priority)
+  beta_start: 0.4            # Initial importance sampling exponent (anneals to 1.0)
+  beta_frames: 1000000       # Number of frames for beta annealing
+  eps: 0.000001              # Small constant for non-zero priorities (1e-6)
 
-# Training parameters
-total_timesteps: 500000
-learning_rate: 0.0003 # 3e-4
-num_envs: 8
-num_steps: 1024
-anneal_lr: True
+# --- Exploration Noise (Ornstein-Uhlenbeck) ---
+ou_noise_params: # Nested dictionary for OU noise parameters
+  theta: 0.15                # Mean reversion factor
+  mu: 0.0                    # Mean of the noise process
+  sigma: 0.2                 # Volatility/standard deviation of the noise
 
-# PPO specific parameters
-gamma: 0.99
-gae_lambda: 0.95
-num_minibatches: 32
-update_epochs: 10
-norm_adv: True
-clip_coef: 0.2
-clip_vloss: True
-ent_coef: 0.01
-vf_coef: 0.5
-max_grad_norm: 0.5
-target_kl: null # Use null for None in YAML
+# --- Preprocessing ---
+preprocessing_params: # Nested dictionary for preprocessing parameters
+  normalize_factor: 255.0    # Factor for normalizing pixel values (e.g., to [0,1] range)
+
+# --- Plotting ---
+plotting_params: # Nested dictionary for plotting parameters
+  reward_plot_title: 'DDPG w/ PER on CarRacing-v3 (from YAML)'
+  reward_plot_filename: 'ddpg_per_rewards_from_yaml.pdf'
