@@ -192,6 +192,27 @@ class PPOAgent(nn.Module):
         value = self.critic_head(self._get_features(obs_batch)) 
         return final_action, log_prob_action, dist.entropy().sum(axis=-1), value
 
+
+def evaluate(agent, env_eval, device):
+    agent.eval()
+
+    obs, _ = env_eval.reset()
+    obs = torch.tensor(obs, dtype=torch.float32).to(device)
+    dones = np.zeros(env_eval.num_envs, dtype=bool)
+    
+    episode_rewards = np.zeros(env_eval.num_envs)
+
+    while not np.any(dones):
+        with torch.no_grad():
+            actions, _, _, _ = agent.get_action_and_value(obs)
+        next_obs, rewards, terminations, truncations, infos = env_eval.step(actions.cpu().numpy())
+        dones = np.logical_or(terminations, truncations)
+        
+        episode_rewards[~dones] += rewards[~dones]
+
+    return episode_rewards.mean(), episode_rewards.std()
+
+
 # --- Main Training Script ---
 
 if __name__ == "__main__":
@@ -200,6 +221,7 @@ if __name__ == "__main__":
 
     # Training setup
     num_envs = cfg['num_envs']
+    num_envs_eval = cfg['eval_envs']
     steps_per_rollout = cfg['num_steps'] # Renamed for clarity
     total_timesteps = cfg['total_timesteps']
     minibatches_per_epoch = cfg['num_minibatches']
@@ -208,6 +230,11 @@ if __name__ == "__main__":
     batch_size = num_envs * steps_per_rollout
     minibatch_size = batch_size // minibatches_per_epoch
     num_training_iterations = total_timesteps // batch_size
+
+    eval_timesteps = []
+    rewards_mean = []
+    rewards_std = []
+    max_reward = None
 
     # Experiment naming and paths
     timestamp = int(time.time())
@@ -236,6 +263,12 @@ if __name__ == "__main__":
         for i in range(num_envs)
     ]
     envs = gym.vector.SyncVectorEnv(env_factories)
+
+    envs_eval = gym.vector.SyncVectorEnv([
+            create_env_factory(cfg['env_id'], i, cfg, run_name + "_eval", None , cfg['frame_stack'])
+            for i in range(num_envs_eval)
+        ])
+
     assert isinstance(envs.single_action_space, gym.spaces.Box), "Continuous actions required."
     print(f"Observation space: {envs.single_observation_space.shape}, Action space: {envs.single_action_space.shape}")
 
@@ -368,10 +401,33 @@ if __name__ == "__main__":
                 nn.utils.clip_grad_norm_(agent.parameters(), cfg['max_grad_norm'])
                 optimizer.step()
 
+        if iteration % cfg.get("eval_frequency", 5000) == 0:
+            mean_reward, std_reward = evaluate(agent, envs_eval, device)
+
+            if max_reward is None or mean_reward > max_reward:
+                tqdm.write(f"New best model saved : {mean_reward}")
+                model_path = os.path.join(model_save_dir, f"model_best.pt")
+                torch.save(agent.state_dict(), model_path)
+                max_reward = mean_reward
+
+            eval_timesteps.append(iteration)
+            rewards_mean.append(mean_reward)
+            rewards_std.append(std_reward)
+
+            tqdm.write(f"[Eval @ iter {iteration}] Avg return: {mean_reward:.2f} +-{std_reward:.2f}")
+
     # --- Save Model and Cleanup ---
     if cfg['save_model']:
-        model_path = os.path.join(model_save_dir, f"{run_name}_final.pt")
+        model_path = os.path.join(model_save_dir, f"model_final.pt")
         torch.save(agent.state_dict(), model_path)
+
+        eval_path = os.path.join(model_save_dir, f"model_eval")
+
+        print(rewards_mean, rewards_std)
+        np.savez(eval_path, timesteps=np.array(eval_timesteps), 
+                 mean_rewards=np.array(rewards_mean), 
+                 std_rewards=np.array(rewards_std),
+                )
         print(f"\nModel saved to {model_path}")
 
     envs.close()

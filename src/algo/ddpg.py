@@ -248,6 +248,29 @@ class DDPG:
         for target, local in zip(self.critic_target.parameters(), self.critic.parameters()):
             target.data.copy_(self.tau * local.data + (1.0 - self.tau) * target.data)
 
+
+def evaluate(agent, env_eval, device, nb_epoch, cfg):
+    normalize_factor = cfg['preprocessing_params']['normalize_factor']
+    rewards = []
+    with torch.no_grad():
+        for epoch in range(nb_epoch):
+            obs, _ = env_eval.reset()
+            obs = preprocess(obs, normalize_factor)
+            done = False
+            
+            episode_rewards = 0
+            for _ in range(cfg['max_steps_per_episode']):
+                actions = agent.select_action(obs)
+                next_ob, reward, terminated, truncated, infos = env_eval.step(actions)
+                
+                if terminated or truncated: break
+                episode_rewards += reward
+
+            rewards.append(episode_rewards)
+
+    return np.mean(rewards), np.std(rewards)
+
+
 # ----------------------
 # Main Training Function
 # ----------------------
@@ -267,6 +290,12 @@ def run_ddpg_training(cfg: dict):
 
     render_mode = "human" if cfg['render_during_training'] else None
     env = gym.make(cfg['env_id'], continuous=True, render_mode=render_mode)
+    env_eval = gym.make(cfg['env_id'], continuous=True)
+
+    eval_timesteps = []
+    rewards_mean = []
+    rewards_std = []
+    max_reward = None
 
     agent = DDPG(env.action_space.shape, cfg['ddpg_params'], cfg['replay_buffer_params'], device)
     noise = OrnsteinUhlenbeck(
@@ -283,7 +312,7 @@ def run_ddpg_training(cfg: dict):
         obs_np, _ = env.reset(seed=cfg['seed'] + ep_idx) # Vary seed for stochastic resets
         obs_tensor = preprocess(obs_np, normalize_factor)
         noise.reset()
-        total_episode_reward = 0.0
+        total_episode_reward = 0
 
         for _step in range(cfg['max_steps_per_episode']):
             if cfg['render_during_training'] and ep_idx % 10 == 0 : # Example: render every 10 episode
@@ -302,6 +331,26 @@ def run_ddpg_training(cfg: dict):
             obs_tensor = next_obs_tensor
             total_episode_reward += reward
             if done: break
+
+        if (ep_idx+1) % cfg.get("eval_frequency", 50) == 0:
+            mean_reward, std_reward = evaluate(agent, env_eval, device, cfg.get("eval_epoch", 5), cfg)
+
+            if max_reward is None or mean_reward > max_reward:
+                tqdm.write(f"New best model saved : {mean_reward}")
+
+                model_dir = "saved_models_ddpg"
+                os.makedirs(model_dir, exist_ok=True)
+                model_path = os.path.join(model_dir, f"{run_signature}_best.pt")
+                torch.save({
+                    'actor_state_dict': agent.actor.state_dict(),
+                    'critic_state_dict': agent.critic.state_dict(),
+                    'config_params': cfg # Save the config used for this run
+                }, model_path)
+                max_reward = mean_reward
+
+            eval_timesteps.append(ep_idx)
+            rewards_mean.append(mean_reward)
+            rewards_std.append(std_reward)
         
         episode_rewards_history.append(total_episode_reward)
         tqdm.write(f"Ep: {ep_idx+1}/{cfg['n_episodes']}, Reward: {total_episode_reward:.2f}")
@@ -325,6 +374,13 @@ def run_ddpg_training(cfg: dict):
             'critic_state_dict': agent.critic.state_dict(),
             'config_params': cfg # Save the config used for this run
         }, model_path)
+
+        eval_path = os.path.join(model_dir, f"model_eval")
+        print(rewards_mean, rewards_std)
+        np.savez(eval_path, timesteps=np.array(eval_timesteps), 
+                 mean_rewards=np.array(rewards_mean), 
+                 std_rewards=np.array(rewards_std),
+                )
         print(f"Trained model saved to: {model_path}")
     env.close()
 

@@ -45,8 +45,15 @@ if __name__ == '__main__':
 
     args = parse_args()
     MODEL_NAME = args.model
+    sb3 = args.stable_baseline
 
     # load agent
+    if sb3:
+        path = cst.AGENT_PATH[MODEL_NAME]
+    
+    else:
+        path = cst.C
+
     model = load_best_agent(cst.AGENT_PATH[MODEL_NAME])
 
     # Run the agent in the environment

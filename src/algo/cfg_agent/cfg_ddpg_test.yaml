@@ -10,11 +10,11 @@ gym_logger_level: 40         # Set gym logger level (40 for ERROR)
 save_model: True
 
 # --- Training Control ---
-n_episodes: 1000             # Total number of training episodes
-max_steps_per_episode: 1000  # Maximum steps allowed within one episode
+n_episodes: 10             # Total number of training episodes
+max_steps_per_episode: 10  # Maximum steps allowed within one episode
 render_during_training: False # Render environment during training (can slow it down)
-eval_frequency: 50
-eval_epoch: 10
+eval_frequency: 5
+eval_epoch: 2
 
 # --- DDPG Algorithm Parameters ---
 ddpg_params: # Nested dictionary for DDPG specific parameters

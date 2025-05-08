@@ -13,18 +13,18 @@ video_frequency: 50 # Record a video every N iterations (e.g., 50)
 frame_stack: 4
 
 # Training parameters
-total_timesteps: 500000
+total_timesteps: 100
 learning_rate: 0.0003 # 3e-4
-num_envs: 8
-num_steps: 1024
+num_envs: 2
+num_steps: 4
 anneal_lr: True
-eval_frequency: 5000
-eval_envs: 2
+eval_frequency: 5
+eval_envs: 5
 
 # PPO specific parameters
 gamma: 0.99
 gae_lambda: 0.95
-num_minibatches: 32
+num_minibatches: 2
 update_epochs: 10
 norm_adv: True
 clip_coef: 0.2
