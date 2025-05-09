@@ -62,7 +62,7 @@ def load_best_agent(path ,sb3=True):
     model_name = path.split("/")[-1].split("-")[0].strip()
     
     extension = "zip" if sb3 else "pt"
-    path = Path(path).joinpath(f"model_best.{extension}")
+    path = Path(path).joinpath(f"model_final.{extension}")
     assert path.exists(), f"{path} doesn't exist"
     
     if sb3:
