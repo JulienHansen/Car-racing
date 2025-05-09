@@ -1,8 +1,16 @@
 from pathlib import Path
+import torch
 
 from stable_baselines3 import DDPG
 from stable_baselines3 import PPO
 from stable_baselines3 import SAC
+
+from algo.ppo import PPOAgent, create_env_factory, load_yaml_config
+
+from algo.beta_ppo import PPOAgent as BetaPPOAgent
+from algo.beta_ppo import create_env_factory as create_beta_env_factory
+
+import gymnasium as gym
 
 
 def load_best_agent(path ,sb3=True):
@@ -44,9 +52,15 @@ def load_best_agent(path ,sb3=True):
         >>> action = model(observation)
     """
     
+    cfg = None
+    if not sb3:
+      path, cfg = path
+      cfg = load_yaml_config(cfg)
+      
     model_name = path.split("/")[-1].split("-")[0].strip()
     
-    path = Path(path).joinpath("model_best.zip")
+    extension = "zip" if sb3 else "pt"
+    path = Path(path).joinpath(f"model_best.{extension}")
     assert path.exists(), f"{path} doesn't exist"
     
     if sb3:
@@ -59,9 +73,26 @@ def load_best_agent(path ,sb3=True):
       else:
         raise NotImplementedError(f"{model_name} is not implemented")
       
-    if model_name == "ppo" or model_name == "beta_ppo":
-      return None
+    if model_name == "ppo":
+      env_factories = [create_env_factory(cfg['env_id'], 0, cfg, "eval", None)]
+      envs = gym.vector.SyncVectorEnv(env_factories)
+      
+      use_cuda = cfg["cuda"]
+      device = 'cuda' if use_cuda else 'cpu'
+      print(device)
+      
+      model = PPOAgent(envs)
+      model.load_state_dict(torch.load(path, weights_only=True, map_location=torch.device(device)))
+      
+      return model, envs, device
+    
+    elif model_name == "beta_ppo":
+      model = BetaPPOAgent()
+      model.load_state_dict(torch.load(path, weights_only=True))
+      
     elif model_name == "ddpg":
+      
+      
       return None
     else:
       raise NotImplementedError(f"{model_name} is not implemented")

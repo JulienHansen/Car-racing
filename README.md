@@ -45,6 +45,6 @@ python src/interface.py \
 ### Evalulation
 ```bash
 python src/interface.py \
-    --model "ppo" \             # "ppo" | "ddp" | "sac"
+    --model "ppo" \             # "ppo" | "ddp"
     --stable_baseline False     # Set to false to use personal models
 ```
