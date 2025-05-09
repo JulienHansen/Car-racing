@@ -32,19 +32,34 @@ python src/sb3/interface.py --model "sac"
 ```
 
 ### Evaluation
+* Evaluating PPO
 ```bash
-python src/interface.py \
-    --model "ppo" \             # "ppo" | "ddp" | "sac"
-    --stable_baseline True      # Set to true to use sb3 models
+python src/interface.py --model "ppo" -sb
 ```
-
+* Evaluating DDPG
+```bash
+python src/interface.py --model "ddpg" -sb
+```
+* Evaluating SAC
+```bash
+python src/interface.py --model "sac" -sb
+```
 ## Question 3 : Personal algorithm
 
 ### Training
 
+Add command
+
 ### Evalulation
+* Evaluating PPO
 ```bash
-python src/interface.py \
-    --model "ppo" \             # "ppo" | "ddp"
-    --stable_baseline False     # Set to false to use personal models
+python src/interface.py --model "ppo" 
+```
+* Evaluating PPO with beta distribution
+```bash
+python src/interface.py --model "beta_ppo" 
+```
+* Evaluating DDPG
+```bash
+python src/interface.py --model "ddpg" 
 ```

@@ -59,7 +59,7 @@ def ddpg_evaluate(agent, env_eval, device, cfg):
         obs, _ = env_eval.reset()
         obs = ddpg_preprocess(obs, normalize_factor)
 
-        for _ in range(cfg['max_steps_per_episode']):
+        while True:
             actions = agent.select_action(obs)
             next_ob, reward, terminated, truncated, infos = env_eval.step(actions)
             
