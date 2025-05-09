@@ -94,8 +94,8 @@ def load_best_agent(path ,sb3=True):
       device = 'cuda' if use_cuda else 'cpu'
       print(device)
       
-      model = BetaPPOAgent()
-      model.load_state_dict(torch.load(path, weights_only=True))
+      model = BetaPPOAgent(envs)
+      model.load_state_dict(torch.load(path, weights_only=True, map_location=torch.device(device)))
       
       return model, envs, device
       
