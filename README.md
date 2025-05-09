@@ -48,6 +48,20 @@ python src/interface.py --model "sac" -sb
 
 ### Training
 
+* Training DDPG
+```bash
+python src/algo/ddpg.py --config cfg_agent/cfg_ddpg.yaml
+```
+* Training PPO
+```bash
+python src/algo/ppo.py --config cfg_agent/cfg_ppo.yaml
+```
+* Training Beta PPO
+```bash
+python src/algo/beta_ppo.py --config cfg_agent/cfg_ppo.yaml
+```
+
+
 Add command
 
 ### Evalulation
