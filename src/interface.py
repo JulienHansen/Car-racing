@@ -26,9 +26,7 @@ def parse_args():
                         help="'ppo' | 'ddpg' | 'sac'")
 
     parser.add_argument('-sb', '--stable_baseline',
-                        action='store',
-                        type=bool,
-                        default=False,
+                        action='store_true',
                         help="Use model trained with stable baseline or our custom implementation")
 
     return parser.parse_args()
@@ -45,11 +43,11 @@ def ppo_evaluate(agent, env_eval, device):
     while not np.any(dones):
         with torch.no_grad():
             actions, _, _, _ = agent.get_action_and_value(obs)
+            print(obs)
         next_obs, rewards, terminations, truncations, infos = env_eval.step(actions.cpu().numpy())
         dones = np.logical_or(terminations, truncations)
         
         episode_rewards.append(rewards[0])
-        
         obs = torch.tensor(next_obs, dtype=torch.float32).to(device)
 
     return episode_rewards
