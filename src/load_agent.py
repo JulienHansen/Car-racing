@@ -87,8 +87,17 @@ def load_best_agent(path ,sb3=True):
       return model, envs, device
     
     elif model_name == "beta_ppo":
+      env_factories = [create_beta_env_factory(cfg['env_id'], 0, cfg, "eval", None, cfg['frame_stack'])]
+      envs = gym.vector.SyncVectorEnv(env_factories)
+      
+      use_cuda = cfg["cuda"]
+      device = 'cuda' if use_cuda else 'cpu'
+      print(device)
+      
       model = BetaPPOAgent()
       model.load_state_dict(torch.load(path, weights_only=True))
+      
+      return model, envs, device
       
     elif model_name == "ddpg":
       

@@ -48,6 +48,8 @@ def ppo_evaluate(agent, env_eval, device):
         dones = np.logical_or(terminations, truncations)
         
         episode_rewards.append(rewards[0])
+        
+        obs = torch.tensor(next_obs, dtype=torch.float32).to(device)
 
     return episode_rewards
 
@@ -89,7 +91,7 @@ if __name__ == '__main__':
             rewards.append(reward)
             episode_over = terminated
     else:
-        if MODEL_NAME == "ppo":
+        if MODEL_NAME == "ppo" or MODEL_NAME == "beta_ppo":
             rewards = ppo_evaluate(*model)
 
     # Print the total reward
