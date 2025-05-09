@@ -5,7 +5,7 @@ from stable_baselines3 import PPO
 from stable_baselines3 import SAC
 
 
-def load_best_agent(path):
+def load_best_agent(path ,sb3=True):
     """
     Load the best agent from the specified path.
 
@@ -49,11 +49,20 @@ def load_best_agent(path):
     path = Path(path).joinpath("model_best.zip")
     assert path.exists(), f"{path} doesn't exist"
     
-    if model_name == "ppo":
-      return PPO.load(path)
+    if sb3:
+      if model_name == "ppo":
+        return PPO.load(path)
+      elif model_name == "ddpg":
+        return DDPG.load(path)
+      elif model_name == "sac":
+        return SAC.load(path)
+      else:
+        raise NotImplementedError(f"{model_name} is not implemented")
+      
+    if model_name == "ppo" or model_name == "beta_ppo":
+      return None
     elif model_name == "ddpg":
-      return DDPG.load(path)
-    elif model_name == "sac":
-      return SAC.load(path)
+      return None
     else:
       raise NotImplementedError(f"{model_name} is not implemented")
+
