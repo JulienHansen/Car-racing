@@ -16,5 +16,5 @@ AGENT_PATH = {
 CUSTOM_AGENT_PATH = {
     "ppo"  : (f"{LOG_DIR}/ppo-custom", f"{CFG_DIR}/cfg_ppo_eval.yaml"),
     "beta_ppo"  : (f"{LOG_DIR}/beta_ppo-custom", f"{CFG_DIR}/cfg_ppo_eval.yaml"),
-    "ddpg" : (f"{LOG_DIR}/ddpg-custom", f"{CFG_DIR}/cfg_ddpg.yaml"),
+    "ddpg" : (f"{LOG_DIR}/ddpg-custom", f"{CFG_DIR}/cfg_ddpg_eval.yaml"),
 }

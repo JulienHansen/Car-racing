@@ -10,6 +10,8 @@ from algo.ppo import PPOAgent, create_env_factory, load_yaml_config
 from algo.beta_ppo import PPOAgent as BetaPPOAgent
 from algo.beta_ppo import create_env_factory as create_beta_env_factory
 
+from algo.ddpg import DDPG as DDPGAgent
+
 import gymnasium as gym
 
 
@@ -100,9 +102,23 @@ def load_best_agent(path ,sb3=True):
       return model, envs, device
       
     elif model_name == "ddpg":
+      env = gym.make(cfg['env_id'], continuous=True)
       
+      device = cfg['device']
+      print(device)
       
-      return None
+      model = DDPGAgent(env.action_space.shape, cfg['ddpg_params'], cfg['replay_buffer_params'], device)
+      
+      checkpoint = torch.load(path, map_location=torch.device(device))
+
+      # Restore model parameters
+      model.actor.load_state_dict(checkpoint['actor_state_dict'])
+      model.critic.load_state_dict(checkpoint['critic_state_dict'])
+      
+      #model.load_state_dict(torch.load(path, weights_only=True, map_location=torch.device(device)))
+      
+      return model, env, device, cfg
+
     else:
       raise NotImplementedError(f"{model_name} is not implemented")
 

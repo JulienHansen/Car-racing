@@ -9,6 +9,7 @@ from stable_baselines3.common.atari_wrappers import WarpFrame
 from stable_baselines3.common.vec_env import VecFrameStack, VecTransposeImage
 
 from algo.ppo import evaluate as ppo_evaluate
+from algo.ddpg import preprocess as ddpg_preprocess
 
 import constant as cst
 import torch
@@ -53,6 +54,23 @@ def ppo_evaluate(agent, env_eval, device):
 
     return episode_rewards
 
+def ddpg_evaluate(agent, env_eval, device, cfg):
+    normalize_factor = cfg['preprocessing_params']['normalize_factor']
+    rewards = []
+    with torch.no_grad():
+        obs, _ = env_eval.reset()
+        obs = ddpg_preprocess(obs, normalize_factor)
+
+        for _ in range(cfg['max_steps_per_episode']):
+            actions = agent.select_action(obs)
+            next_ob, reward, terminated, truncated, infos = env_eval.step(actions)
+            
+            if terminated or truncated: break
+            rewards.append(reward)
+            obs = ddpg_preprocess(next_ob, normalize_factor)
+            
+    return rewards
+
 # Load the trained agent
 # env = gym.make(cst.env_str, render_mode="human", lap_complete_percent=0.95, domain_randomize=False, continuous=True)
 
@@ -93,6 +111,8 @@ if __name__ == '__main__':
     else:
         if MODEL_NAME == "ppo" or MODEL_NAME == "beta_ppo":
             rewards = ppo_evaluate(*model)
+        elif MODEL_NAME == "ddpg":
+            rewards = ddpg_evaluate(*model)
 
     # Print the total reward
     print(f"Total reward: {sum(rewards)}")
