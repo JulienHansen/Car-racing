@@ -39,14 +39,17 @@ def ppo_evaluate(agent, env_eval, device):
     dones = np.zeros(env_eval.num_envs, dtype=bool)
     
     episode_rewards = []
+    total_reward = 0
 
     while not np.any(dones):
         with torch.no_grad():
             actions, _, _, _ = agent.get_action_and_value(obs)
-            print(obs)
+            #print(obs)
         next_obs, rewards, terminations, truncations, infos = env_eval.step(actions.cpu().numpy())
         dones = np.logical_or(terminations, truncations)
         
+        #total_reward += rewards[0]
+        #episode_rewards.append(total_reward)
         episode_rewards.append(rewards[0])
         obs = torch.tensor(next_obs, dtype=torch.float32).to(device)
 
@@ -74,20 +77,19 @@ def ddpg_evaluate(agent, env_eval, device, cfg):
 
 
 if __name__ == '__main__':
-    env = make_vec_env(cst.env_str, wrapper_class=WarpFrame,
-                       env_kwargs={"render_mode": "human",
-                                   "lap_complete_percent": 0.95,
-                                   "domain_randomize": False,
-                                   "continuous": True})
-    env = VecFrameStack(env, n_stack=4)
-    env = VecTransposeImage(env)
-    observation = env.reset()
-
     args = parse_args()
     MODEL_NAME = args.model
     sb3 = args.stable_baseline
     
-    print(sb3)
+    if sb3:
+        env = make_vec_env(cst.env_str, wrapper_class=WarpFrame,
+                        env_kwargs={"render_mode": "human",
+                                    "lap_complete_percent": 0.95,
+                                    "domain_randomize": False,
+                                    "continuous": True})
+        env = VecFrameStack(env, n_stack=4)
+        env = VecTransposeImage(env)
+        observation = env.reset()
 
     # load agent
     if sb3:
@@ -115,8 +117,9 @@ if __name__ == '__main__':
     # Print the total reward
     print(f"Total reward: {sum(rewards)}")
 
-    # Close the environment
-    env.close()
+    if sb3:
+        # Close the environment
+        env.close()
 
     plt.plot(np.arange(len(rewards)), rewards)
     plt.xlabel("Time step")

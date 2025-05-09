@@ -35,11 +35,12 @@ def load_yaml_config(config_path: str) -> dict:
         print(f"FATAL: Error parsing YAML file '{config_path}': {e}")
         exit(1)
 
-def create_env_factory(env_id, env_idx, cfg, run_name, video_rec_trigger):
+def create_env_factory(env_id, env_idx, cfg, run_name, video_rec_trigger, render_human = False):
     """Returns a function that creates and appropriately wraps an environment instance."""
     def _init_env():
         is_video_env = cfg['capture_video'] and env_idx == 0
         render_mode = "rgb_array" if is_video_env else None
+        render_mode = "human" if render_human else render_mode
         env = gym.make(env_id, render_mode=render_mode)
         env = gym.wrappers.RecordEpisodeStatistics(env)
 

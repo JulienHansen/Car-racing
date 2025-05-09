@@ -76,7 +76,7 @@ def load_best_agent(path ,sb3=True):
         raise NotImplementedError(f"{model_name} is not implemented")
       
     if model_name == "ppo":
-      env_factories = [create_env_factory(cfg['env_id'], 0, cfg, "eval", None)]
+      env_factories = [create_env_factory(cfg['env_id'], 0, cfg, "eval", None, True)]
       envs = gym.vector.SyncVectorEnv(env_factories)
       
       use_cuda = cfg["cuda"]
@@ -89,7 +89,7 @@ def load_best_agent(path ,sb3=True):
       return model, envs, device
     
     elif model_name == "beta_ppo":
-      env_factories = [create_beta_env_factory(cfg['env_id'], 0, cfg, "eval", None, cfg['frame_stack'])]
+      env_factories = [create_beta_env_factory(cfg['env_id'], 0, cfg, "eval", None, cfg['frame_stack'], True)]
       envs = gym.vector.SyncVectorEnv(env_factories)
       
       use_cuda = cfg["cuda"]
@@ -102,7 +102,7 @@ def load_best_agent(path ,sb3=True):
       return model, envs, device
       
     elif model_name == "ddpg":
-      env = gym.make(cfg['env_id'], continuous=True)
+      env = gym.make(cfg['env_id'], continuous=True, render_mode = "human")
       
       device = cfg['device']
       print(device)
