@@ -6,9 +6,9 @@ torch_deterministic: True
 cuda: True
 env_id: "CarRacing-v3"
 
-save_model: True # Enable/disable saving the final model
-capture_video: True # Enable/disable video recording
-video_frequency: 50 # Record a video every N iterations (e.g., 50)
+save_model: True 
+capture_video: True 
+video_frequency: 50 
 
 frame_stack: 4
 
@@ -32,4 +32,4 @@ clip_vloss: True
 ent_coef: 0.01
 vf_coef: 0.5
 max_grad_norm: 0.5
-target_kl: null # Use null for None in YAML
+target_kl: null 
