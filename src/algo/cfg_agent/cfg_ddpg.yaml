@@ -31,9 +31,9 @@ replay_buffer_params:
 
 # --- Ornstein-Uhlenbeck process ---
 ou_noise_params: 
-  theta: 0.15                
-  mu: 0.0                   
-  sigma: 0.2          
+  theta: 0.2               
+  mu: 0.001                   
+  sigma: 0.25          
 
 # --- Preprocessing ---
 preprocessing_params: 

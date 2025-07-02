@@ -62,8 +62,6 @@ python src/algo/beta_ppo.py --config cfg_agent/cfg_ppo.yaml
 ```
 
 
-Add command
-
 ### Evalulation
 * Evaluating PPO
 ```bash

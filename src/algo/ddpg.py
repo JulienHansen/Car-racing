@@ -225,11 +225,11 @@ class DDPG:
             q_targets = rewards + (1.0 - dones) * self.gamma * next_target_q_values
         
         td_errors = q_targets - current_q_values
-        critic_loss = (per_weights * td_errors.pow(2)).mean() # Weighted MSE for PER
+        critic_loss = (per_weights * td_errors.pow(2)).mean() 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
-        self.memory.update_priorities(indices, td_errors.detach()) # Detach errors for PER update
+        self.memory.update_priorities(indices, td_errors.detach()) 
 
         # Actor update
         self.actor.train()
@@ -309,13 +309,13 @@ def run_ddpg_training(cfg: dict):
     run_signature = f"{cfg['env_id']}_DDPG_{cfg['seed']}_{int(time.time())}"
 
     for ep_idx in tqdm(range(cfg['n_episodes']), desc="Training DDPG"):
-        obs_np, _ = env.reset(seed=cfg['seed'] + ep_idx) # Vary seed for stochastic resets
+        obs_np, _ = env.reset(seed=cfg['seed'] + ep_idx) 
         obs_tensor = preprocess(obs_np, normalize_factor)
         noise.reset()
         total_episode_reward = 0
 
         for _step in range(cfg['max_steps_per_episode']):
-            if cfg['render_during_training'] and ep_idx % 10 == 0 : # Example: render every 10 episode
+            if cfg['render_during_training'] and ep_idx % 10 == 0 :
                 env.render()
 
             action_from_policy_np = agent.select_action(obs_tensor)
